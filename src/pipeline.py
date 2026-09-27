@@ -1,9 +1,13 @@
 from pathlib import Path
 import time
-from recognition import recognize
+from hazard_detector import detect_hazards
 import numpy as np
 import torch
 from PIL import Image
+
+from recognition import recognize
+from contracts import FrameInput, PipelineResult, FaceResult, Detection
+from scene_detector import detect_scene
 
 
 # ============================================================
@@ -78,8 +82,8 @@ def dummy_face_detector(image):
     """
     Pretend that a face detector found a face.
 
-    Returns a bounding box:
-    x1, y1, x2, y2
+    Returns:
+        x1, y1, x2, y2, confidence
     """
 
     width, height = image.size
@@ -156,7 +160,140 @@ def create_dummy_embedding(face_tensor, device):
 
 
 # ============================================================
-# 6. MAIN PIPELINE
+# 6. PIPELINE INTERFACE
+# ============================================================
+
+def run_pipeline(frame: FrameInput) -> PipelineResult:
+    """
+    Run the current dummy face pipeline on one input frame.
+
+    This is the future integration point for real models.
+    """
+
+    start_time = time.perf_counter()
+
+    result = PipelineResult(
+        frame_id=frame.frame_id,
+        timestamp=frame.timestamp,
+    )
+
+    try:
+        # Select CPU now, GPU automatically later
+        device = torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu"
+        )
+
+        # Ensure RGB
+        image = frame.image.convert("RGB")
+        # ----------------------------------------------------
+        # Scene / object detection
+        # ----------------------------------------------------
+
+        scene = detect_scene(
+            image.width,
+            image.height
+        )
+        hazards = detect_hazards(scene)
+        result.hazards.extend(hazards)
+
+        result.depth_available = scene.depth_available
+
+        for obj in scene.objects:
+            result.detections.append(
+                Detection(
+                    label=obj.label,
+                    confidence=obj.confidence,
+                    x1=obj.bbox.x1,
+                    y1=obj.bbox.y1,
+                    x2=obj.bbox.x2,
+                    y2=obj.bbox.y2,
+                )
+            )
+
+        # ----------------------------------------------------
+        # Dummy face detection
+        # ----------------------------------------------------
+
+        bbox = dummy_face_detector(image)
+
+        # ----------------------------------------------------
+        # Face crop
+        # ----------------------------------------------------
+
+        face = crop_face(image, bbox)
+
+        # ----------------------------------------------------
+        # Preprocessing
+        # ----------------------------------------------------
+
+        face_tensor = preprocess_image(face).to(device)
+
+        # ----------------------------------------------------
+        # Dummy embedding
+        # ----------------------------------------------------
+
+        embedding = create_dummy_embedding(
+            face_tensor,
+            device
+        )
+
+        # ----------------------------------------------------
+        # Dummy recognition gallery
+        # ----------------------------------------------------
+
+        gallery = {
+            "Person_A": create_dummy_embedding(
+                face_tensor,
+                device
+            ),
+            "Person_B": create_dummy_embedding(
+                face_tensor,
+                device
+            ),
+            "Person_C": create_dummy_embedding(
+                face_tensor,
+                device
+            ),
+        }
+
+        identity, similarity = recognize(
+            embedding,
+            gallery,
+            threshold=0.5
+        )
+
+        # ----------------------------------------------------
+        # Store face result
+        # ----------------------------------------------------
+
+        result.faces.append(
+            FaceResult(
+                identity=identity,
+                confidence=bbox["confidence"],
+                similarity=similarity,
+                x1=bbox["x1"],
+                y1=bbox["y1"],
+                x2=bbox["x2"],
+                y2=bbox["y2"],
+            )
+        )
+
+    except Exception as exc:
+        result.errors.append(str(exc))
+
+    # --------------------------------------------------------
+    # Timing
+    # --------------------------------------------------------
+
+    result.processing_time_ms = (
+        time.perf_counter() - start_time
+    ) * 1000
+
+    return result
+
+
+# ============================================================
+# 7. ORIGINAL DUMMY PIPELINE DEMO
 # ============================================================
 
 def main():
@@ -243,9 +380,18 @@ def main():
     # --------------------------------------------------------
 
     gallery = {
-        "Person_A": create_dummy_embedding(face_tensor, device),
-        "Person_B": create_dummy_embedding(face_tensor, device),
-        "Person_C": create_dummy_embedding(face_tensor, device),
+        "Person_A": create_dummy_embedding(
+            face_tensor,
+            device
+        ),
+        "Person_B": create_dummy_embedding(
+            face_tensor,
+            device
+        ),
+        "Person_C": create_dummy_embedding(
+            face_tensor,
+            device
+        ),
     }
 
     identity, similarity = recognize(
@@ -257,7 +403,6 @@ def main():
     print("\nRecognition:")
     print(f"  Identity: {identity}")
     print(f"  Similarity: {similarity:.4f}")
-
 
     # --------------------------------------------------------
     # Timing
@@ -276,6 +421,10 @@ def main():
 
     print("=" * 50)
 
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
 
 if __name__ == "__main__":
     main()
